@@ -1,0 +1,35 @@
+const int btn = 2;
+unsigned long count = 0;
+unsigned long lastDebounceTime = 0;
+int lastButtonState = HIGH;     // исходно отпущена (INPUT_PULLUP)
+const unsigned long debounceDelay = 50;
+
+void setup() {
+  pinMode(btn, INPUT_PULLUP);
+  Serial.begin(9600);
+  Serial.println("=== Счётчик нажатий запущен ===");
+}
+
+void loop() {
+  int reading = digitalRead(btn);
+
+  // Если состояние изменилось — запускаем таймер дребезга
+  if (reading != lastButtonState) {
+    lastDebounceTime = millis();
+  }
+
+  // Если прошло достаточно времени и состояние стабильно
+  if ((millis() - lastDebounceTime) > debounceDelay) {
+    
+    // Детектим ТОЛЬКО момент нажатия (переход HIGH → LOW)
+    if (reading == LOW && lastButtonState == HIGH) {
+      count++;
+      Serial.print("Время: ");
+      Serial.print(millis() / 1000);
+      Serial.print(" сек | Нажатий: ");
+      Serial.println(count);
+    }
+  }
+
+  lastButtonState = reading;   // сохраняем текущее состояние
+}
