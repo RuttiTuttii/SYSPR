@@ -1,209 +1,495 @@
-Привет! Отлично, что хочешь нестандартный подход — это будет круто и выделится на фоне типичных лабораторных из Visual Studio с дизайнером. Я всё продумал на основе исследования (dotnet CLI + WinForms в VS Code, NuGet-пакеты для современного вида, обработка прав доступа в .NET 8+, работа с архивами и т.д.).
-Мы сделаем полностью кодовый UI (без Form Designer), используем VS Code как основной «движок» разработки, добавим современную Material-тему (чтобы выглядело стильно, почти как современные приложения), а иконки возьмём через библиотеку + PNG из Google (как в задании, но с удобной загрузкой). Права доступа обработаем элегантно без лишних ошибок.
-1. Почему этот подход нестандартный и правильный
-	•	VS Code как движок: dotnet new winforms + C# extension. Никакого тяжёлого Visual Studio. Всё в коде (Dock, TableLayoutPanel, Anchor).
-	•	Современный вид: NuGet MaterialSkin.2 — Material Design тема (тёмная, как VS Code).
-	•	Иконки через библиотеку: Основной набор PNG скачаем с https://fonts.google.com/icons (folder, insert_drive_file, article, picture_as_pdf и default). Загрузим в ImageList. Дополнительно можно подключить Rop.Winforms.Icons.MaterialDesign (или просто MaterialSkin), но базово хватит ImageList + ExtractAssociatedIcon для реальных системных иконок (нестандартно и круто, если захочешь).
-	•	Права доступа: EnumerationOptions { IgnoreInaccessible = true } — автоматически пропускает папки без прав (без UnauthorizedAccessException).
-	•	Архивы: встроенный System.IO.Compression (ZipFile).
-	•	Всё по заданию 5.1–5.5, но чище и современнее.
-2. Настройка проекта в VS Code (5 минут)
-	1	Установи .NET 8 SDK (если нет).
-	2	В VS Code установи расширения: C# и C# Dev Kit от Microsoft.
-	3	Создай папку проекта → открой в VS Code.
-	4	В терминале выполни: dotnet new winforms -o FileManager --framework net8.0-windows
-	5	cd FileManager
-	6	dotnet add package MaterialSkin.2
-	7	dotnet restore
-	8	
-	9	Открой FileManager.csproj и убедись, что там net8.0-windows.
-Готово! Теперь весь код будем писать вручную.
-3. Структура UI (как расставить элементы управления)
-В Form1.cs полностью перепишем InitializeComponent (или сделаем свой метод SetupUI()). Используем TableLayoutPanel для красивого размещения:
-	•	Строка меню — MenuStrip (можно добавить пункты File/Вид, но по заданию хватит пустой или с Exit).
-	•	Поле текущего каталога — TextBox + кнопка «Перейти» в FlowLayoutPanel (Dock = Top).
-	•	Список файлов — ListView (Dock = Fill, View = Details, с колонками Иконка + Имя + Дата + Размер).
-	•	Контекстное меню — ContextMenuStrip привязывается к ListView.
-Пример кода (вставь в public partial class Form1 : Form):
 using System;
+using System.Collections.Specialized;
+using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Windows.Forms;
-using MaterialSkin;
-using MaterialSkin.Controls;
 
-public partial class Form1 : MaterialForm  // ← MaterialSkin вместо обычного Form
+namespace FileManager
 {
-    private string currentPath;
-    private ListView listView;
-    private TextBox pathTextBox;
-    private ImageList imageList;
-    private ContextMenuStrip contextMenu;
-
-    public Form1()
+    public class Form1 : Form
     {
-        InitializeMaterialTheme();  // Material Design
-        SetupUI();
-        currentPath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        pathTextBox.Text = currentPath;
-        LoadDirectory(currentPath);
-    }
-
-    private void InitializeMaterialTheme()
-    {
-        var materialSkinManager = MaterialSkinManager.Instance;
-        materialSkinManager.AddFormToManage(this);
-        materialSkinManager.Theme = MaterialSkinManager.Themes.DARK;  // как VS Code
-        materialSkinManager.ColorScheme = new ColorScheme(
-            Primary.BlueGrey800, Primary.BlueGrey900,
-            Primary.LightBlue500, Accent.LightBlue200, TextShade.WHITE);
-    }
-
-    private void SetupUI()
-    {
-        this.SuspendLayout();
-        this.Text = "Файловый менеджер";
-        this.Size = new Size(900, 600);
-        this.MinimumSize = new Size(600, 400);
-
-        // Меню
-        var menu = new MenuStrip();
-        this.MainMenuStrip = menu;
-        this.Controls.Add(menu);
-
-        // Панель пути (верх)
-        var pathPanel = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 40, AutoSize = true };
-        pathTextBox = new TextBox { Width = 600, Text = currentPath };
-        var btnGo = new MaterialButton { Text = "Перейти" };
-        btnGo.Click += (s, e) => ChangeDirectory(pathTextBox.Text);
-        pathTextBox.KeyDown += (s, e) => { if (e.KeyCode == Keys.Enter) ChangeDirectory(pathTextBox.Text); };
-        pathPanel.Controls.Add(pathTextBox);
-        pathPanel.Controls.Add(btnGo);
-        this.Controls.Add(pathPanel);
-
-        // Список
-        listView = new ListView
+        // === НАСТРОЙКА ИКОНОК ===
+        // СКАЧАЙТЕ PNG-иконки с https://fonts.google.com/icons?icon.size=24&icon.color=%23e8eaed
+        // Рекомендуемые иконки (размер 24x24):
+        // 1. folder (для папок и "..")
+        // 2. insert_drive_file (иконка файла по умолчанию)
+        // 3. description (для .txt)
+        // 4. code (для .exe)
+        // 5. image (для .jpg/.png)
+        //
+        // ВСТАВЛЯЙТЕ СВОИ ПУТИ ТОЛЬКО ЗДЕСЬ:
+        private readonly string[] iconPaths = new string[5]
         {
-            Dock = DockStyle.Fill,
-            View = View.Details,
-            FullRowSelect = true,
-            GridLines = true,
-            MultiSelect = true
+            @"C:\Icons\folder.png",          // 0 — папка
+            @"C:\Icons\default_file.png",    // 1 — файл по умолчанию
+            @"C:\Icons\text.png",            // 2 — .txt
+            @"C:\Icons\exe.png",             // 3 — .exe
+            @"C:\Icons\image.png"            // 4 — изображения
         };
-        listView.Columns.Add("Имя", 300);
-        listView.Columns.Add("Дата изменения", 150);
-        listView.Columns.Add("Размер", 100);
 
-        // Иконки (библиотека ImageList + PNG)
-        imageList = new ImageList { ImageSize = new Size(24, 24) };
-        // Скачай PNG с Google Icons и положи в папку проекта (Copy to Output Directory = Copy always)
-        imageList.Images.Add("folder", Image.FromFile("icons/folder.png"));
-        imageList.Images.Add("file", Image.FromFile("icons/file.png"));
-        imageList.Images.Add("doc", Image.FromFile("icons/doc.png"));
-        imageList.Images.Add("pdf", Image.FromFile("icons/pdf.png"));
-        imageList.Images.Add("default", Image.FromFile("icons/default.png"));
-        listView.SmallImageList = imageList;
+        private string currentPath;
+        private ListView listView1;
+        private TextBox textBoxPath;
+        private MenuStrip menuStrip1;
+        private ContextMenuStrip contextMenuStrip1;
+        private ImageList imageList1;
 
-        listView.DoubleClick += ListView_DoubleClick;
-        listView.ItemActivate += ListView_ItemActivate; // для Enter тоже
+        public Form1()
+        {
+            InitializeUI();
+            LoadIcons();
+            LoadDirectory(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile));
+        }
 
-        // Контекстное меню
-        contextMenu = new ContextMenuStrip();
-        var copyItem = new ToolStripMenuItem("Копировать");
-        copyItem.Click += Copy_Click;
-        var pasteItem = new ToolStripMenuItem("Вставить");
-        pasteItem.Click += Paste_Click;
-        var compressItem = new ToolStripMenuItem("Сжать в архив");
-        compressItem.Click += Compress_Click;
-        var extractItem = new ToolStripMenuItem("Извлечь из архива");
-        extractItem.Click += Extract_Click;
+        private void InitializeUI()
+        {
+            this.Text = "Файловый менеджер — Лабораторная работа №17";
+            this.Size = new Size(1000, 700);
+            this.StartPosition = FormStartPosition.CenterScreen;
+            this.Font = new Font("Segoe UI", 10);
+            this.BackColor = Color.White;
+            this.MinimumSize = new Size(800, 600);
 
-        contextMenu.Items.AddRange(new ToolStripItem[] { copyItem, pasteItem, new ToolStripSeparator(), compressItem, extractItem });
-        contextMenu.Opening += ContextMenu_Opening; // динамически включаем/выключаем пункты
-        listView.ContextMenuStrip = contextMenu;
+            // === Строка меню ===
+            menuStrip1 = new MenuStrip
+            {
+                Dock = DockStyle.Top,
+                BackColor = Color.FromArgb(245, 245, 245)
+            };
+            ToolStripMenuItem fileMenu = new ToolStripMenuItem("Файл");
+            fileMenu.DropDownItems.Add(new ToolStripMenuItem("Выход", null, (s, e) => Application.Exit()));
+            menuStrip1.Items.Add(fileMenu);
+            this.Controls.Add(menuStrip1);
 
-        this.Controls.Add(listView);
-        this.ResumeLayout();
-    }
-4. Ключевые методы (по заданию)
-private void LoadDirectory(string path)
-{
-    listView.Items.Clear();
-    currentPath = path;
-    pathTextBox.Text = path;
+            // === Поле текущего каталога ===
+            Panel pathPanel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 40,
+                BackColor = Color.FromArgb(240, 240, 240)
+            };
 
-    // Специальный ".."
-    var upItem = new ListViewItem("..") { ImageKey = "folder", Tag = Directory.GetParent(path)?.FullName ?? path };
-    listView.Items.Add(upItem);
+            Label lblPath = new Label
+            {
+                Text = "Путь:",
+                Location = new Point(10, 10),
+                AutoSize = true,
+                Font = new Font("Segoe UI", 10, FontStyle.Bold)
+            };
 
-    var options = new EnumerationOptions { IgnoreInaccessible = true }; // ← права доступа без ошибок!
+            textBoxPath = new TextBox
+            {
+                Location = new Point(60, 8),
+                Width = 780,
+                Font = new Font("Consolas", 10),
+                Text = ""
+            };
+            textBoxPath.KeyDown += TextBoxPath_KeyDown;
 
-    var dirInfo = new DirectoryInfo(path);
-    foreach (var d in dirInfo.EnumerateDirectories("*", options))
-    {
-        var item = new ListViewItem(d.Name) { ImageKey = "folder", Tag = d.FullName };
-        listView.Items.Add(item);
-    }
+            Button btnGo = new Button
+            {
+                Text = "Перейти",
+                Location = new Point(850, 7),
+                Width = 90,
+                Height = 26,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = Color.FromArgb(0, 122, 204),
+                ForeColor = Color.White
+            };
+            btnGo.Click += (s, e) => NavigateToPath();
 
-    foreach (var f in dirInfo.EnumerateFiles("*", options))
-    {
-        string iconKey = GetIconKey(f.Extension.ToLower());
-        var item = new ListViewItem(f.Name) { ImageKey = iconKey, Tag = f.FullName };
-        item.SubItems.Add(f.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
-        item.SubItems.Add(FormatSize(f.Length));
-        listView.Items.Add(item);
+            pathPanel.Controls.Add(lblPath);
+            pathPanel.Controls.Add(textBoxPath);
+            pathPanel.Controls.Add(btnGo);
+            this.Controls.Add(pathPanel);
+
+            // === Список файлов ===
+            listView1 = new ListView
+            {
+                Dock = DockStyle.Fill,
+                View = View.Details,
+                FullRowSelect = true,
+                GridLines = true,
+                MultiSelect = true,
+                SmallImageList = null, // будет присвоен позже
+                Font = new Font("Segoe UI", 10),
+                BackColor = Color.White,
+                ForeColor = Color.Black
+            };
+
+            listView1.Columns.Add("Имя", 380);
+            listView1.Columns.Add("Дата изменения", 160);
+            listView1.Columns.Add("Размер", 120);
+
+            listView1.DoubleClick += ListView1_DoubleClick;
+            listView1.MouseClick += ListView1_MouseClick; // для контекстного меню
+
+            this.Controls.Add(listView1);
+
+            // === Контекстное меню ===
+            contextMenuStrip1 = new ContextMenuStrip();
+            contextMenuStrip1.Items.Add(new ToolStripMenuItem("Копировать", null, Copy_Click));
+            contextMenuStrip1.Items.Add(new ToolStripMenuItem("Вставить", null, Paste_Click));
+            contextMenuStrip1.Items.Add(new ToolStripSeparator());
+            contextMenuStrip1.Items.Add(new ToolStripMenuItem("Сжать в архив", null, Compress_Click));
+            contextMenuStrip1.Items.Add(new ToolStripMenuItem("Извлечь из архива", null, Extract_Click));
+
+            listView1.ContextMenuStrip = contextMenuStrip1;
+        }
+
+        private void LoadIcons()
+        {
+            imageList1 = new ImageList
+            {
+                ImageSize = new Size(24, 24),
+                ColorDepth = ColorDepth.Depth32Bit
+            };
+
+            try
+            {
+                for (int i = 0; i < iconPaths.Length; i++)
+                {
+                    if (File.Exists(iconPaths[i]))
+                        imageList1.Images.Add(Image.FromFile(iconPaths[i]));
+                    else
+                        imageList1.Images.Add(new Bitmap(24, 24)); // заглушка
+                }
+            }
+            catch
+            {
+                // если иконки не найдены — используем пустые
+                for (int i = 0; i < 5; i++)
+                    imageList1.Images.Add(new Bitmap(24, 24));
+            }
+
+            listView1.SmallImageList = imageList1;
+        }
+
+        private void LoadDirectory(string path)
+        {
+            if (!Directory.Exists(path))
+            {
+                MessageBox.Show("Указанный каталог не существует!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            currentPath = path;
+            textBoxPath.Text = currentPath;
+            listView1.Items.Clear();
+
+            // Специальный элемент «..»
+            ListViewItem upItem = new ListViewItem("..")
+            {
+                ImageIndex = 0,
+                Tag = "UP"
+            };
+            listView1.Items.Add(upItem);
+
+            try
+            {
+                // Папки
+                foreach (string dir in Directory.GetDirectories(path).OrderBy(d => Path.GetFileName(d)))
+                {
+                    DirectoryInfo di = new DirectoryInfo(dir);
+                    ListViewItem item = new ListViewItem(Path.GetFileName(dir))
+                    {
+                        ImageIndex = 0,
+                        Tag = dir
+                    };
+                    item.SubItems.Add(di.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
+                    item.SubItems.Add("");
+                    listView1.Items.Add(item);
+                }
+
+                // Файлы
+                foreach (string file in Directory.GetFiles(path).OrderBy(f => Path.GetFileName(f)))
+                {
+                    FileInfo fi = new FileInfo(file);
+                    int imgIndex = GetImageIndex(fi.Name);
+
+                    ListViewItem item = new ListViewItem(fi.Name)
+                    {
+                        ImageIndex = imgIndex,
+                        Tag = file
+                    };
+                    item.SubItems.Add(fi.LastWriteTime.ToString("dd.MM.yyyy HH:mm"));
+                    item.SubItems.Add(FormatFileSize(fi.Length));
+                    listView1.Items.Add(item);
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка загрузки каталога:\n{ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private int GetImageIndex(string fileName)
+        {
+            string ext = Path.GetExtension(fileName).ToLowerInvariant();
+            return ext switch
+            {
+                ".txt" => 2,
+                ".exe" or ".dll" => 3,
+                ".jpg" or ".jpeg" or ".png" or ".bmp" or ".gif" => 4,
+                _ => 1 // файл по умолчанию
+            };
+        }
+
+        private string FormatFileSize(long bytes)
+        {
+            if (bytes == 0) return "0 Б";
+            string[] sizes = { "Б", "КБ", "МБ", "ГБ" };
+            int order = 0;
+            double size = bytes;
+            while (size >= 1024 && order < sizes.Length - 1)
+            {
+                order++;
+                size /= 1024;
+            }
+            return $"{size:0.##} {sizes[order]}";
+        }
+
+        private void ListView1_DoubleClick(object sender, EventArgs e)
+        {
+            if (listView1.SelectedItems.Count == 0) return;
+
+            ListViewItem item = listView1.SelectedItems[0];
+            string name = item.Text;
+
+            if (name == "..")
+            {
+                DirectoryInfo parent = Directory.GetParent(currentPath);
+                if (parent != null)
+                    LoadDirectory(parent.FullName);
+                return;
+            }
+
+            string fullPath = item.Tag?.ToString();
+            if (string.IsNullOrEmpty(fullPath)) return;
+
+            if (Directory.Exists(fullPath))
+            {
+                LoadDirectory(fullPath);
+            }
+            else if (File.Exists(fullPath))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo(fullPath) { UseShellExecute = true });
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Не удалось открыть файл:\n{ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void TextBoxPath_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Enter)
+                NavigateToPath();
+        }
+
+        private void NavigateToPath()
+        {
+            string newPath = textBoxPath.Text.Trim();
+            if (Directory.Exists(newPath))
+                LoadDirectory(newPath);
+            else
+                MessageBox.Show("Каталог не существует!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+
+        private void ListView1_MouseClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button == MouseButtons.Right)
+            {
+                // Контекстное меню уже привязано к listView1
+            }
+        }
+
+        // ====================== КОПИРОВАТЬ ======================
+        private void Copy_Click(object sender, EventArgs e)
+        {
+            if (listView1.SelectedItems.Count == 0) return;
+
+            StringCollection files = new StringCollection();
+
+            foreach (ListViewItem item in listView1.SelectedItems)
+            {
+                if (item.Text != "..")
+                {
+                    string path = item.Tag?.ToString();
+                    if (!string.IsNullOrEmpty(path))
+                        files.Add(path);
+                }
+            }
+
+            if (files.Count > 0)
+            {
+                Clipboard.SetFileDropList(files);
+                // Небольшая подсказка
+                ToolStripMenuItem menuItem = sender as ToolStripMenuItem;
+                if (menuItem != null) menuItem.Text = "Копировать ✓";
+                System.Threading.Tasks.Task.Delay(800).ContinueWith(_ =>
+                    this.Invoke(new Action(() => { if (menuItem != null) menuItem.Text = "Копировать"; })));
+            }
+        }
+
+        // ====================== ВСТАВИТЬ ======================
+        private void Paste_Click(object sender, EventArgs e)
+        {
+            if (!Clipboard.ContainsFileDropList())
+            {
+                MessageBox.Show("В буфере обмена нет файлов или папок!", "Вставить", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            StringCollection files = Clipboard.GetFileDropList();
+            bool anySuccess = false;
+
+            foreach (string src in files)
+            {
+                try
+                {
+                    string name = Path.GetFileName(src);
+                    string target = Path.Combine(currentPath, name);
+
+                    if (Directory.Exists(src))
+                    {
+                        if (Directory.Exists(target))
+                        {
+                            MessageBox.Show($"Папка уже существует:\n{target}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            continue;
+                        }
+                        CopyDirectory(src, target);
+                        anySuccess = true;
+                    }
+                    else if (File.Exists(src))
+                    {
+                        if (File.Exists(target))
+                        {
+                            MessageBox.Show($"Файл уже существует:\n{target}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                            continue;
+                        }
+                        File.Copy(src, target, false);
+                        anySuccess = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Ошибка при вставке {Path.GetFileName(src)}:\n{ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+
+            if (anySuccess)
+                LoadDirectory(currentPath);
+        }
+
+        private void CopyDirectory(string sourceDir, string targetDir)
+        {
+            Directory.CreateDirectory(targetDir);
+
+            foreach (string file in Directory.GetFiles(sourceDir))
+            {
+                string destFile = Path.Combine(targetDir, Path.GetFileName(file));
+                File.Copy(file, destFile, false);
+            }
+
+            foreach (string dir in Directory.GetDirectories(sourceDir))
+            {
+                string destDir = Path.Combine(targetDir, Path.GetFileName(dir));
+                CopyDirectory(dir, destDir);
+            }
+        }
+
+        // ====================== СЖАТЬ В АРХИВ ======================
+        private void Compress_Click(object sender, EventArgs e)
+        {
+            if (listView1.SelectedItems.Count != 1)
+            {
+                MessageBox.Show("Выберите одну папку для сжатия!", "Сжать в архив", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            ListViewItem item = listView1.SelectedItems[0];
+            if (item.Text == "..") return;
+
+            string fullPath = item.Tag?.ToString();
+            if (!Directory.Exists(fullPath))
+            {
+                MessageBox.Show("Выберите каталог!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string folderName = Path.GetFileName(fullPath);
+            string zipPath = Path.Combine(currentPath, folderName + ".zip");
+
+            if (File.Exists(zipPath))
+            {
+                MessageBox.Show("Архив с таким именем уже существует!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                ZipFile.CreateFromDirectory(fullPath, zipPath);
+                MessageBox.Show($"Архив успешно создан:\n{zipPath}", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                LoadDirectory(currentPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка создания архива:\n{ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // ====================== ИЗВЛЕЧЬ ИЗ АРХИВА ======================
+        private void Extract_Click(object sender, EventArgs e)
+        {
+            if (listView1.SelectedItems.Count != 1)
+            {
+                MessageBox.Show("Выберите один ZIP-файл!", "Извлечь из архива", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            ListViewItem item = listView1.SelectedItems[0];
+            if (item.Text == "..") return;
+
+            string fullPath = item.Tag?.ToString();
+            if (!File.Exists(fullPath) || !fullPath.ToLower().EndsWith(".zip"))
+            {
+                MessageBox.Show("Выберите файл с расширением .zip!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            string extractPath = Path.Combine(currentPath, Path.GetFileNameWithoutExtension(fullPath));
+
+            if (Directory.Exists(extractPath))
+            {
+                MessageBox.Show("Папка с таким именем уже существует!", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            try
+            {
+                ZipFile.ExtractToDirectory(fullPath, extractPath);
+                MessageBox.Show($"Файлы успешно извлечены в:\n{extractPath}", "Готово", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                LoadDirectory(currentPath);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Ошибка извлечения архива:\n{ex.Message}", "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        [STAThread]
+        static void Main()
+        {
+            Application.EnableVisualStyles();
+            Application.SetCompatibleTextRenderingDefault(false);
+            Application.Run(new Form1());
+        }
     }
 }
-
-private string GetIconKey(string ext)
-{
-    return ext switch
-    {
-        ".doc" or ".docx" => "doc",
-        ".pdf" => "pdf",
-        _ => "default"  // или "file"
-    };
-}
-
-private string FormatSize(long bytes)
-{
-    string[] sizes = { "Б", "КБ", "МБ", "ГБ" };
-    int order = 0;
-    while (bytes >= 1024 && order < sizes.Length - 1)
-    {
-        order++;
-        bytes /= 1024;
-    }
-    return $"{bytes:F2} {sizes[order]}";
-}
-
-private void ListView_DoubleClick(object sender, EventArgs e)
-{
-    if (listView.SelectedItems.Count == 0) return;
-    var item = listView.SelectedItems[0];
-    var tagPath = item.Tag as string;
-
-    if (item.Text == "..")
-    {
-        var parent = Directory.GetParent(currentPath)?.FullName;
-        if (parent != null) LoadDirectory(parent);
-    }
-    else if (Directory.Exists(tagPath))
-        LoadDirectory(tagPath);
-    else if (File.Exists(tagPath))
-        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(tagPath) { UseShellExecute = true });
-}
-Остальное (буфер обмена + архивы):
-	•	ContextMenu_Opening — проверяем выделенное: если папка → Compress enabled, если .zip → Extract, если что-то выделено → Copy.
-	•	Копировать: Clipboard.SetFileDropList(new StringCollection { fullPaths }).
-	•	Вставить: var files = Clipboard.GetFileDropList(); → File.Copy / рекурсивный копировать папок (простая функция на 10 строк).
-	•	Сжать: ZipFile.CreateFromDirectory(selectedDir, Path.Combine(currentPath, name + ".zip"));
-	•	Извлечь: ZipFile.ExtractToDirectory(zipPath, Path.Combine(currentPath, Path.GetFileNameWithoutExtension(zipPath)));
-Все ошибки — try { ... } catch (Exception ex) { MessageBox.Show(ex.Message, "Ошибка", MessageBoxButtons.OK, MessageBoxIcon.Error); }
-5. Что дальше
-	•	Положи папку icons рядом с .exe (или в проект с Copy always).
-	•	Для ещё более крутых иконок можешь добавить dotnet add package Rop.Winforms.Icons.MaterialDesign и использовать Material-иконки как картинки.
-	•	Запуск: dotnet run прямо в VS Code.
-Если нужно — могу дать полный готовый код Form1.cs (или отдельные методы) или помочь с рекурсивным копированием папок. Просто скажи, на каком этапе застрял.
-Это полностью соответствует заданию, но выглядит и разрабатывается современно. Удачи с лабой — должно зайти преподавателю! 🚀
